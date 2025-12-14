@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Malus's Law Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        /* UI Overlay Container */
+        #ui-container {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 320px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            color: white;
+            border: 1px solid #444;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+
+        h1 { margin: 0 0 10px 0; font-size: 18px; color: #4facfe; }
+        
+        /* Sliders and Labels */
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 14px; }
+        input[type=range] { width: 100%; cursor: pointer; }
+        
+        /* Data Display */
+        .data-row { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 14px; }
+        .data-val { font-weight: bold; font-family: monospace; }
+        
+        /* Graph Canvas */
+        #graph-canvas {
+            background: #222;
+            width: 100%;
+            height: 100px;
+            margin-top: 10px;
+            border: 1px solid #555;
+        }
+
+        .legend { font-size: 12px; color: #aaa; margin-top: 5px; }
+        .legend span { display: inline-block; width: 10px; height: 10px; margin-right: 5px; }
+    </style>
+    <!-- Import Three.js via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <!-- UI Controls -->
+    <div id="ui-container">
+        <h1>Malus's Law Simulator</h1>
+        
+        <div class="control-group">
+            <label for="angleSlider">Analyzer Angle: <span id="angleDisplay">0</span>°</label>
+            <input type="range" id="angleSlider" min="0" max="360" value="0">
+        </div>
+
+        <div class="data-row">
+            <span>Amplitude (E):</span>
+            <span id="ampDisplay" class="data-val" style="color: #ff5555">1.00</span>
+        </div>
+        <div class="data-row">
+            <span>Intensity (I):</span>
+            <span id="intDisplay" class="data-val" style="color: #ffffff">100%</span>
+        </div>
+
+        <canvas id="graph-canvas" width="280" height="100"></canvas>
+        
+        <div class="legend">
+            <p><span style="background:#00ffff;"></span>Incoming Light (Vertical)</p>
+            <p><span style="background:#ff0000;"></span>Outgoing Light (Transmitted)</p>
+        </div>
+    </div>
+
+    <!-- The 3D Container -->
+    <div id="canvas-container"></div>
+
+<script>
+    // --- 1. SCENE SETUP ---
+    const scene = new THREE.Scene();
+    // Dark fog for depth
+    scene.fog = new THREE.FogExp2(0x1a1a1a, 0.02);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(10, 6, 15); // x, y, z
+    camera.lookAt(5, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    // Grid Helper for reference
+    const gridHelper = new THREE.GridHelper(30, 30, 0x333333, 0x222222);
+    scene.add(gridHelper);
+
+    // --- 2. OBJECTS ---
+
+    // A. The Axis Line (Direction of propagation)
+    const axisMaterial = new THREE.LineBasicMaterial({ color: 0x555555 });
+    const axisPoints = [new THREE.Vector3(-2, 0, 0), new THREE.Vector3(12, 0, 0)];
+    const axisGeo = new THREE.BufferGeometry().setFromPoints(axisPoints);
+    const axisLine = new THREE.Line(axisGeo, axisMaterial);
+    scene.add(axisLine);
+
+    // B. The Analyzer Filter (Visual Representation)
+    // Create a circular rim
+    const filterGroup = new THREE.Group();
+    filterGroup.position.set(5, 0, 0); // Placed at x=5
+    scene.add(filterGroup);
+
+    const ringGeo = new THREE.TorusGeometry(1.5, 0.05, 16, 100);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x888888 });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.y = Math.PI / 2; // Face the beam
+    filterGroup.add(ring);
+
+    // The Slit (The line showing polarization axis)
+    const slitGeo = new THREE.BoxGeometry(0.05, 2.8, 0.05);
+    const slitMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const slit = new THREE.Mesh(slitGeo, slitMat);
+    filterGroup.add(slit);
+    
+    // Transparent glass effect
+    const glassGeo = new THREE.CircleGeometry(1.5, 32);
+    const glassMat = new THREE.MeshBasicMaterial({ color: 0x5555ff, transparent: true, opacity: 0.1, side: THREE.DoubleSide });
+    const glass = new THREE.Mesh(glassGeo, glassMat);
+    glass.rotation.y = Math.PI / 2;
+    filterGroup.add(glass);
+
+
+    // --- 3. WAVE GENERATION LOGIC ---
+
+    const numPoints = 200;
+    
+    // Function to create wave line objects
+    function createWaveLine(color) {
+        const geometry = new THREE.BufferGeometry();
+        // Initialize with zeros
+        const positions = new Float32Array(numPoints * 3);
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const material = new THREE.LineBasicMaterial({ color: color, linewidth: 2 });
+        return new THREE.Line(geometry, material);
+    }
+
+    const incomingWave = createWaveLine(0x00ffff); // Cyan
+    scene.add(incomingWave);
+
+    const outgoingWave = createWaveLine(0xff0000); // Red
+    scene.add(outgoingWave);
+
+    // Physics variables
+    let time = 0;
+    const waveSpeed = 0.1;
+    const frequency = 2.0;
+    const incomingAmplitude = 1.0;
+    
+    // --- 4. GRAPH SETUP (2D Canvas) ---
+    const canvas = document.getElementById('graph-canvas');
+    const ctx = canvas.getContext('2d');
+    
+    function drawGraph(currentAngleDeg) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw Axis
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, canvas.height); // bottom left
+        ctx.lineTo(canvas.width, canvas.height);
+        ctx.stroke();
+
+        // Draw Malus Curve: I = cos^2(theta)
+        ctx.beginPath();
+        ctx.strokeStyle = '#4facfe';
+        ctx.lineWidth = 2;
+
+        for (let x = 0; x <= canvas.width; x++) {
+            // Map x pixels to degrees (0 to 360)
+            const deg = (x / canvas.width) * 360;
+            const rad = deg * (Math.PI / 180);
+            
+            // Calculate Intensity (0 to 1)
+            const intensity = Math.pow(Math.cos(rad), 2);
+            
+            // Map Intensity to Y pixels (Height is 100px)
+            const y = canvas.height - (intensity * (canvas.height - 10)); // -10 for padding
+            
+            if (x === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Draw Current Point
+        const currentX = (currentAngleDeg / 360) * canvas.width;
+        const currentRad = currentAngleDeg * (Math.PI / 180);
+        const currentI = Math.pow(Math.cos(currentRad), 2);
+        const currentY = canvas.height - (currentI * (canvas.height - 10));
+
+        ctx.fillStyle = 'red';
+        ctx.beginPath();
+        ctx.arc(currentX, currentY, 4, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // --- 5. ANIMATION LOOP ---
+
+    const slider = document.getElementById('angleSlider');
+    const angleDisplay = document.getElementById('angleDisplay');
+    const ampDisplay = document.getElementById('ampDisplay');
+    const intDisplay = document.getElementById('intDisplay');
+
+    function animate() {
+        requestAnimationFrame(animate);
+        
+        time += waveSpeed;
+
+        // 1. Get User Input
+        const angleDeg = parseFloat(slider.value);
+        const angleRad = angleDeg * (Math.PI / 180);
+        
+        // 2. Physics Calculations (Malus's Law)
+        // Incoming wave is vertically polarized (0 deg relative to Y axis)
+        // Amplitude Out = Amp_In * cos(theta)
+        const outputAmplitude = incomingAmplitude * Math.cos(angleRad);
+        
+        // Intensity = Amplitude^2 (Assuming I0 = 1)
+        const intensity = Math.pow(outputAmplitude, 2);
+
+        // 3. Update UI
+        angleDisplay.textContent = angleDeg;
+        ampDisplay.textContent = Math.abs(outputAmplitude).toFixed(2);
+        intDisplay.textContent = (intensity * 100).toFixed(0) + "%";
+        drawGraph(angleDeg);
+
+        // 4. Update 3D Objects
+        
+        // Rotate the Analyzer Filter
+        filterGroup.rotation.x = angleRad; // Rotating around X axis acts as the filter rotation here relative to Z prop
+
+        // --- Update Incoming Wave (x: -5 to 5) ---
+        // Vertically polarized (oscillates in Y)
+        const inPositions = incomingWave.geometry.attributes.position.array;
+        for (let i = 0; i < numPoints; i++) {
+            const x = -5 + (i / numPoints) * 10; // Span from x=-5 to x=5
+            
+            // Only draw up to the filter (x=5)
+            if (x > 5) {
+                inPositions[i*3+1] = 0;
+                inPositions[i*3+2] = 0;
+                continue;
+            }
+
+            const y = incomingAmplitude * Math.sin(frequency * (x - time));
+            const z = 0;
+
+            inPositions[i*3] = x;
+            inPositions[i*3+1] = y;
+            inPositions[i*3+2] = z;
+        }
+        incomingWave.geometry.attributes.position.needsUpdate = true;
+
+        // --- Update Outgoing Wave (x: 5 to 15) ---
+        // Polarized at angleRad, Amplitude scaled
+        const outPositions = outgoingWave.geometry.attributes.position.array;
+        for (let i = 0; i < numPoints; i++) {
+            const x = 5 + (i / numPoints) * 10; // Span from x=5 to x=15
+            
+            // Oscillation logic
+            const waveVal = Math.sin(frequency * (x - time));
+            
+            // The wave physically oscillates ALONG the slit angle
+            // Magnitude determines length of vector
+            // Direction determines y/z components
+            
+            // Note: Malus law results in amplitude change.
+            // If angle is 90 deg, cos(90)=0, wave is flat.
+            // If angle is 180 deg, cos(180)=-1, wave flips phase but full height.
+            
+            const mag = outputAmplitude * waveVal; // This includes the cos(theta) scaling
+            
+            // We rotate the oscillation direction by angleRad
+            // Y component = mag * cos(angle) ? No, the filter is rotated.
+            // If filter is 0 (vertical), oscillation is Y.
+            // If filter is 90 (horizontal), oscillation is Z.
+            
+            // However, the amplitude variable `outputAmplitude` already contains the `cos(theta)` scaling factor.
+            // So we just need to project the oscillation onto the rotated axis.
+            
+            // Actually, strictly speaking for simulation visuals:
+            // The wave emerges parallel to the analyzer slit.
+            // Its magnitude is I_in * cos(theta).
+            
+            // Calculate vector components based on the slit angle:
+            const y = mag * Math.cos(0); // The math here is tricky visually. 
+            // Let's simplify: 
+            // The wave has magnitude 'outputAmplitude'.
+            // It oscillates along the vector defined by angleRad.
+            
+            // But wait, `outputAmplitude` varies with cos(theta).
+            // Let's use pure oscillation and rotate it.
+            const pureOscillation = Math.sin(frequency * (x - time));
+            const physicalHeight = incomingAmplitude * Math.cos(angleRad) * pureOscillation;
+            
+            // Now project this physical height onto Y and Z based on angleRad
+            const yPos = physicalHeight * Math.cos(angleRad);
+            const zPos = physicalHeight * Math.sin(angleRad);
+
+            outPositions[i*3] = x;
+            outPositions[i*3+1] = yPos;
+            outPositions[i*3+2] = zPos;
+        }
+        outgoingWave.geometry.attributes.position.needsUpdate = true;
+
+        renderer.render(scene, camera);
+    }
+
+    // Handle Window Resize
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Start
+    animate();
+
+</script>
+</body>
+</html>
